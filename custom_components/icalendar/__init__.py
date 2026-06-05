@@ -3,7 +3,6 @@
 import logging
 
 from typing import Optional
-from html import escape
 from http import HTTPStatus
 
 from aiohttp import web
@@ -18,6 +17,7 @@ from .const import DOMAIN, CONTENT_TYPE_ICAL
 
 
 _LOGGER = logging.getLogger(__name__)
+
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
@@ -39,6 +39,20 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
     return False
 
+def fold_line(line: str) -> str:
+    """
+    Fold a long iCal line per RFC 5545 section 3.1.
+    Lines over 75 chars are split with a newline + leading space,
+    which calendar clients automatically unfold when reading.
+    """
+    if len(line) <= 75:
+        return line
+    chunks = []
+    while len(line) > 75:
+        chunks.append(line[:75])
+        line = " " + line[75:]   # continuation lines start with a space
+    chunks.append(line)
+    return "\n".join(chunks)
 
 class iCalendarView(HomeAssistantView):
     """Define the iCalendar view."""
@@ -118,35 +132,37 @@ class iCalendarView(HomeAssistantView):
         # Craft the iCalendar response
         response = "BEGIN:VCALENDAR\n"
         response += "VERSION:2.0\n"
-        response += "PRODID:-//Home Assistant//iCal Subscription 1.1//EN\n"
+        response += "PRODID:-//Home Assistant//iCal Subscription 2.0//EN\n"
         response += "CALSCALE:GREGORIAN\n"
         response += "METHOD:PUBLISH\n"
-        response += f"ORGANIZER;CN=\"{escape(self._state.attributes['friendly_name'])}\":MAILTO:{entity_id}@homeassistant.local\n"
-        response += f"NAME:{escape(self._state.attributes['friendly_name'])}\n"
-        response += f"X-WR-CALNAME:{escape(self._state.attributes['friendly_name'])}\n"
+        response += fold_line(f"ORGANIZER;CN=\"{self._state.attributes['friendly_name']}\":MAILTO:{entity_id}@homeassistant.local") + "\n"
+        response += fold_line(f"NAME:{self._state.attributes['friendly_name']}") + "\n"
+        response += fold_line(f"X-WR-CALNAME:{self._state.attributes['friendly_name']}") + "\n"
+
         if calendar_colour is not None:
             response += f"COLOR:{calendar_colour}\n"
 
         # Generate the variables
-        entity_id = escape(entity_id)
         dtstamp = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
         # Iterate through all the events
         for e in events:
-            try:
+            if "T" in e["start"] or ":" in e["start"]:
+                # Timed event
                 start = datetime.fromisoformat(e["start"]).astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
                 end = datetime.fromisoformat(e["end"]).astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            except:
-                start = datetime.strptime(
-                    e["start"], "%Y-%m-%d"
-                ).strftime("%Y%m%d")
-                end = datetime.strptime(
-                    e["end"], "%Y-%m-%d"
-                ).strftime("%Y%m%d")
-
+                start_prop = f"DTSTART:{start}"
+                end_prop = f"DTEND:{end}"
+            else:
+                # All-day event
+                start = datetime.strptime(e["start"], "%Y-%m-%d").strftime("%Y%m%d")
+                end = datetime.strptime(e["end"], "%Y-%m-%d").strftime("%Y%m%d")
+                start_prop = f"DTSTART;VALUE=DATE:{start}"
+                end_prop = f"DTEND;VALUE=DATE:{end}"
+            
             # Create and hash the UID
             if ("summary" in e and e["summary"] is not None):
-                summary = escape(e['summary'])
+                summary = e['summary']
             else:
                 summary = None
 
@@ -157,34 +173,32 @@ class iCalendarView(HomeAssistantView):
 
             response += f"UID:{uid}\n"
             response += f"DTSTAMP:{dtstamp}\n"
-            response += f"DTSTART:{start}\n"
-            response += f"DTEND:{end}\n"
+            response += f"{start_prop}\n"
+            response += f"{end_prop}\n"
 
             # Add available optional attributes to the iCalendar response
             if summary is not None:
-                response += f"SUMMARY:{summary.replace('\n', '\n ').rstrip()}\n"
-
+                response += fold_line(f"SUMMARY:{summary.replace(chr(10), chr(92)+'n').replace(chr(13), '').rstrip()}") + "\n"
             if (
                 "description" in e
                 and e["description"] is not None
             ):
-                response += (
-                    f"DESCRIPTION:{escape(e['description']).replace('\n', '\n ').rstrip()}\n"
-                )
-
+                response += fold_line(f"DESCRIPTION:{e['description'].replace(chr(10), chr(92)+'n').replace(chr(13), '').rstrip()}") + "\n"
+                
             if (
                 "location" in e
                 and e["location"] is not None
             ):
-                response += f"LOCATION:{escape(e['location']).replace('\n', '\n ').rstrip()}\n"
+                response += fold_line(f"LOCATION:{e['location'].replace(chr(10), chr(92)+'n').replace(chr(13), '').rstrip()}") + "\n"
 
             # Set colour for event, defined in config as per below:
             # colours:
             #   - name: "Calendar Event Summary"
             #     colour: css3 colour name
-            for c in self.colours:
-                if ("name" in c) and (c['name'] == summary):
-                    response += f"COLOR:{c['colour']}\n"
+            if self.colours:
+                for c in self.colours:
+                    if ("name" in c) and (c['name'] == summary):
+                        response += f"COLOR:{c['colour']}\n"
 
             # Finish up this calendar entry
             response += "END:VEVENT\n"
