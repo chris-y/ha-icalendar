@@ -133,16 +133,34 @@ class iCalendarView(HomeAssistantView):
 
         # Iterate through all the events
         for e in events:
-            try:
-                start = datetime.fromisoformat(e["start"]).astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-                end = datetime.fromisoformat(e["end"]).astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            except:
+            event_start = e["start"]
+            event_end = e["end"]
+
+            # Home Assistant returns all-day events as YYYY-MM-DD.
+            # Export those as RFC 5545 DATE values to avoid timezone conversion.
+            is_all_day = (
+                isinstance(event_start, str)
+                and isinstance(event_end, str)
+                and len(event_start) == 10
+                and len(event_end) == 10
+                and "T" not in event_start
+                and "T" not in event_end
+            )
+
+            if is_all_day:
                 start = datetime.strptime(
-                    e["start"], "%Y-%m-%d"
+                    event_start, "%Y-%m-%d"
                 ).strftime("%Y%m%d")
                 end = datetime.strptime(
-                    e["end"], "%Y-%m-%d"
+                    event_end, "%Y-%m-%d"
                 ).strftime("%Y%m%d")
+            else:
+                start = datetime.fromisoformat(
+                    event_start
+                ).astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                end = datetime.fromisoformat(
+                    event_end
+                ).astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
             # Create and hash the UID
             if ("summary" in e and e["summary"] is not None):
@@ -157,8 +175,12 @@ class iCalendarView(HomeAssistantView):
 
             response += f"UID:{uid}\n"
             response += f"DTSTAMP:{dtstamp}\n"
-            response += f"DTSTART:{start}\n"
-            response += f"DTEND:{end}\n"
+            if is_all_day:
+                response += f"DTSTART;VALUE=DATE:{start}\n"
+                response += f"DTEND;VALUE=DATE:{end}\n"
+            else:
+                response += f"DTSTART:{start}\n"
+                response += f"DTEND:{end}\n"
 
             # Add available optional attributes to the iCalendar response
             if summary is not None:
